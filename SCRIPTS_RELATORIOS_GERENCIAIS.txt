@@ -1,0 +1,221 @@
+----------------------------------------------------------------------------------------
+Lista todas as Capacidades em uso: 
+----------------------------------------------------------------------------------------
+
+# Autenticar na conta do Power BI (se ainda não estiver autenticado)
+Connect-PowerBIServiceAccount
+
+# Obter todas as capacidades disponíveis no tenant
+$capacities = Get-PowerBICapacity -Scope Organization
+
+# Selecionar apenas ID e nome
+$capacityData = $capacities | Select-Object Id, DisplayName
+
+# Pasta para salvar
+$folderPath = "C:\PowerBI-Logs"
+if (-not (Test-Path $folderPath)) {
+    New-Item -ItemType Directory -Path $folderPath
+}
+
+# Nome do arquivo
+$fileName = "PowerBI_Capacities_{0}.csv" -f (Get-Date -Format "yyyyMMdd_HHmmss")
+$fullPath = Join-Path -Path $folderPath -ChildPath $fileName
+
+# Salvar como CSV
+$capacityData | Export-Csv -Path $fullPath -NoTypeInformation -Encoding UTF8
+
+Write-Host "✅ Capacidades exportadas para: $fullPath"
+
+---------------------------------------------------------------------------------
+
+Lista todos os workspaces e os administradores em cada uma das capacidades
+---------------------------------------------------------------------------------
+# Cria a pasta de destino se não existir
+$targetFolder = "C:\PowerBI-Logs"
+if (-not (Test-Path $targetFolder)) {
+    New-Item -ItemType Directory -Path $targetFolder | Out-Null
+}
+
+# Pega todos os workspaces com escopo de organização (requer permissão de admin)
+$workspaces = Get-PowerBIWorkspace -Scope Organization -All
+
+# Cria lista para armazenar resultados
+$resultList = @()
+
+foreach ($ws in $workspaces) {
+    $workspaceName = $ws.Name
+    $workspaceId   = $ws.Id
+    $capacityId    = if ($ws.CapacityId) { $ws.CapacityId.ToLower() } else { $null }
+    $users         = $ws.Users
+
+    if ($users) {
+        foreach ($user in $users) {
+            if ($user.AccessRight -eq "Admin") {
+                $resultList += [PSCustomObject]@{
+                    WorkspaceName   = $workspaceName
+                    WorkspaceId     = $workspaceId
+                    capacityid      = $capacityId  # caixa baixa
+                    AdminIdentifier = $user.Identifier
+                    AccessRight     = $user.AccessRight
+                    PrincipalType   = $user.PrincipalType
+                }
+            }
+        }
+    }
+}
+
+# Define caminho do arquivo CSV
+$csvPath = Join-Path -Path $targetFolder -ChildPath "PowerBI_Workspace_Administrators.csv"
+
+# Exporta para CSV
+$resultList | Export-Csv -Path $csvPath -NoTypeInformation -Encoding UTF8
+
+Write-Host "✅ Arquivo CSV salvo em: $csvPath"
+
+-----------------------------------------------------------------------------------------
+Lista todos os .pbix acessados e a quantidade de vezes:
+-----------------------------------------------------------------------------------------
+
+# Instalar o módulo MicrosoftPowerBIMgmt, se ainda não estiver instalado
+if (-not (Get-Module -ListAvailable -Name MicrosoftPowerBIMgmt)) {
+    Install-Module -Name MicrosoftPowerBIMgmt -Scope CurrentUser -Force
+}
+ 
+# Conectar-se ao serviço do Power BI
+Connect-PowerBIServiceAccount
+ 
+# Número de dias a serem extraídos
+$NbrDaysToExtract = 15
+ 
+# Local onde o arquivo será salvo
+$ExportFileLocation = 'C:\PowerBI-Logs'
+$ExportFileName = 'ReportViewsSummary.csv'
+ 
+# Verifica se o diretório de exportação existe; caso contrário, cria-o
+if (-not (Test-Path -Path $ExportFileLocation)) {
+    New-Item -ItemType Directory -Path $ExportFileLocation | Out-Null
+}
+ 
+# Lista para armazenar todos os eventos
+$AllEvents = @()
+ 
+# Loop para extrair os logs de cada dia
+for ($i = 0; $i -lt $NbrDaysToExtract; $i++) {
+    $ActivityDate = (Get-Date).AddDays(-$i).ToString('yyyy-MM-dd')
+    Write-Output "Extraindo logs de: $ActivityDate"
+
+    try {
+        # Obtém os eventos do Power BI para a data especificada
+        $Events = Get-PowerBIActivityEvent -StartDateTime "$ActivityDate`T00:00:00.000Z" -EndDateTime "$ActivityDate`T23:59:59.999Z"
+
+        if ($Events) {
+            $ParsedEvents = $Events | ConvertFrom-Json
+
+            # Filtra somente eventos de visualização de relatório
+            $ReportViews = $ParsedEvents | Where-Object { $_.Activity -eq "ViewReport" }
+
+            if ($ReportViews.Count -gt 0) {
+                $AllEvents += $ReportViews
+                Write-Output "Eventos de visualização adicionados para: $ActivityDate"
+            } else {
+                Write-Output "Nenhuma visualização de relatório em: $ActivityDate"
+            }
+        } else {
+            Write-Output "Nenhum evento encontrado para: $ActivityDate"
+        }
+    } catch {
+        Write-Warning "⚠️ Erro ao processar logs de ${ActivityDate}: $_"
+    }
+}
+ 
+# Se houver eventos de visualização, processa e exporta
+if ($AllEvents.Count -gt 0) {
+    # Agrupa por WorkspaceId e nome do relatório, e conta as visualizações
+    $Summary = $AllEvents | Group-Object WorkspaceId, ReportName | ForEach-Object {
+        [PSCustomObject]@{
+            WorkspaceId = $_.Name.Split(',')[0].Trim()
+            ReportName  = $_.Name.Split(',')[1].Trim()
+            ViewCount   = $_.Count
+        }
+    }
+
+    # Exporta o resumo para CSV
+    $Summary | Export-Csv -Path "$ExportFileLocation\$ExportFileName" -NoTypeInformation -Encoding UTF8
+    Write-Output "✅ Resumo de visualizações salvo em: $ExportFileLocation\$ExportFileName"
+} else {
+    Write-Output "⚠️ Nenhuma visualização de relatório encontrada no período especificado."
+}
+
+--------------------------------------------------------------------------------------------------------------
+Lista todos os .pbix dos workspaces:
+*OBS O usuário precisa ter acesso de pelo menos "Viewer" no workspace para ter acesso a lista de relatórios
+--------------------------------------------------------------------------------------------------------------
+
+# Login (caso ainda não tenha feito)
+Connect-PowerBIServiceAccount
+
+# Cria pasta caso não exista
+$csvPath = "C:\PowerBI-Logs\fabric_all_reports.csv"
+if (-not (Test-Path "C:\PowerBI-Logs")) {
+    New-Item -ItemType Directory -Path "C:\PowerBI-Logs" | Out-Null
+}
+
+# Captura todas as capacidades
+$capacities = Get-PowerBICapacity -Scope Organization | Select DisplayName, Id, SKU
+
+# Mostra todas as capacidades
+Write-Host "📦 Lista de capacidades disponíveis:"
+$capacities | Format-Table DisplayName, Id, SKU
+
+# Lista todos os workspaces
+$workspaces = Get-PowerBIWorkspace -Scope Organization -All
+
+# Lista final para exportação
+$exportList = @()
+
+foreach ($ws in $workspaces) {
+    $capacityId = $ws.CapacityId
+    $capacity = $capacities | Where-Object { $_.Id -eq $capacityId }
+    $capacitySku = if ($capacity) { $capacity.SKU.ToLower() } else { "n/a" }
+    $capacityName = if ($capacity) { $capacity.DisplayName } else { "Desconhecida" }
+
+    Write-Host "📁 Workspace: $($ws.Name) - ID: $($ws.Id) - Capacidade: $capacitySku"
+
+    # Extrai Admins
+    $admins = $ws.Users | Where-Object { $_.AccessRight -eq "Admin" } | Select-Object -ExpandProperty UserPrincipalName
+    $adminList = ($admins -join "; ")
+
+    try {
+        # Obtém relatórios dentro do workspace
+        $reports = Get-PowerBIReport -WorkspaceId $ws.Id
+
+        if ($reports.Count -eq 0) {
+            Write-Host "   ⚠️ Nenhum relatório encontrado."
+        } else {
+            foreach ($report in $reports) {
+                Write-Host "   📊 Report: $($report.Name) - ID: $($report.Id)"
+
+                $exportList += [PSCustomObject]@{
+                    WorkspaceName   = $ws.Name
+                    WorkspaceId     = $ws.Id
+                    CapacityName    = $capacityName
+                    CapacityId      = $capacityId.ToLower()
+                    CapacitySKU     = $capacitySku
+                    WorkspaceAdmins = $adminList
+                    ReportName      = $report.Name
+                    ReportId        = $report.Id
+                }
+            }
+        }
+    }
+    catch {
+        Write-Host "   ❌ Erro ao acessar relatórios para este workspace. Verifique suas permissões."
+    }
+
+    Write-Host ""
+}
+
+# Exporta resultado
+$exportList | Export-Csv -Path $csvPath -NoTypeInformation -Encoding UTF8
+Write-Host "`n✅ Resultado salvo em: $csvPath"
+
